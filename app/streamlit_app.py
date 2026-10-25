@@ -1,11 +1,16 @@
 import os
+import sys
+from pathlib import Path
+
+# repo root on the path, so car_insurance_claim imports on a fresh clone / Streamlit Cloud without `pip install -e .`
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from car_insurance_claim.config import MODELS_DIR, PROJ_ROOT
-from car_insurance_claim.mlops.mlflow_utils import get_latest_run_metrics, log_batch_inference
+from car_insurance_claim.mlops.mlflow_utils import get_latest_run_metrics, log_batch_inference, mlflow_disponivel
 from car_insurance_claim.modeling.predict import (
     list_available_models,
     load_business_threshold,
@@ -47,6 +52,21 @@ def _load_results_table(path):
     return None
 
 
+@st.cache_data(ttl=60)
+def _mlflow_ativo():
+    return mlflow_disponivel()
+
+
+def _metricas_do_csv(nome_modelo):
+    tabela = _load_results_table(PROJ_ROOT / "output" / "resultados_modelos.csv")
+    if tabela is None:
+        return None
+    linha = tabela[tabela["modelo"] == nome_modelo]
+    if linha.empty:
+        return None
+    return {c: float(linha.iloc[0][c]) for c in ("roc_auc", "pr_auc", "recall", "precisao", "f1") if c in linha.columns}
+
+
 st.title("🚗 Car Insurance Claim — Risk Scoring")
 st.caption("Previsão em lote de risco de sinistro, com seleção de modelo e métricas no MLflow.")
 
@@ -65,18 +85,25 @@ with st.sidebar:
         step=0.01,
         help=f"Padrão carregado de models/limiar_negocio.joblib ({default_threshold:.2f}).",
     )
-    log_to_mlflow = st.checkbox("Registrar esta execução no MLflow", value=True)
+    mlflow_ativo = _mlflow_ativo()
+    log_to_mlflow = st.checkbox("Registrar esta execução no MLflow", value=mlflow_ativo, disabled=not mlflow_ativo)
 
     st.divider()
     st.markdown(f"**Modelo selecionado:** `{model_name}`")
-    metrics = get_latest_run_metrics(model_name)
+    if mlflow_ativo:
+        metrics, fonte = get_latest_run_metrics(model_name), "MLflow"
+    else:
+        metrics, fonte = _metricas_do_csv(model_name), "output/resultados_modelos.csv"
     if metrics:
-        st.markdown("**Última métrica de validação (MLflow):**")
+        st.markdown(f"**Métricas de validação ({fonte}):**")
         for key, value in metrics.items():
             st.metric(key.replace("val_", ""), f"{value:.4f}")
     else:
-        st.caption("Sem métricas de treino no MLflow para este modelo ainda (rode o retreinamento ou o backfill).")
-    st.link_button("Abrir MLflow UI", MLFLOW_UI_URL, use_container_width=True)
+        st.caption("Sem métricas de validação registradas para este modelo.")
+    if mlflow_ativo:
+        st.link_button("Abrir MLflow UI", MLFLOW_UI_URL, width="stretch")
+    else:
+        st.caption("MLflow não está conectado: o app funciona normalmente, só não registra as execuções.")
 
 tab_predict, tab_compare = st.tabs(["📄 Previsão em lote", "📊 Comparativo de modelos"])
 
@@ -131,7 +158,7 @@ with tab_predict:
                     vista = result[primeiras + [c for c in result.columns if c not in primeiras]].sort_values(
                         "claim_probability", ascending=False
                     )
-                    st.dataframe(vista, use_container_width=True, height=400)
+                    st.dataframe(vista, width="stretch", height=400)
 
                     st.download_button(
                         "⬇️ Baixar previsões (CSV)",
@@ -154,14 +181,15 @@ with tab_compare:
 
     if ml_table is not None:
         st.markdown("**10 modelos de árvore/boosting** (`notebooks/model_ml.ipynb`)")
-        st.dataframe(ml_table.round(4), use_container_width=True)
+        st.dataframe(ml_table.round(4), width="stretch")
         st.bar_chart(ml_table.set_index("modelo")[["roc_auc", "pr_auc"]])
     else:
         st.caption("output/resultados_modelos.csv não encontrado ainda.")
 
     if glm_table is not None:
         st.markdown("**5 modelos GLM / generalistas** (`notebooks/glm_poisson.ipynb`)")
-        st.dataframe(glm_table.round(4), use_container_width=True)
+        st.dataframe(glm_table.round(4), width="stretch")
         st.bar_chart(glm_table.set_index("modelo")[["roc_auc", "pr_auc"]])
 
-    st.caption(f"Para histórico completo de execuções e versões de modelo, veja o MLflow: {MLFLOW_UI_URL}")
+    if mlflow_ativo:
+        st.caption(f"Para histórico completo de execuções e versões de modelo, veja o MLflow: {MLFLOW_UI_URL}")
